@@ -2,46 +2,6 @@ package page
 
 import (
 	"encoding/binary"
-	"errors"
-	"os"
-)
-
-var (
-	ErrInvalidMagic    = errors.New("magic number validation failed")
-	ErrInvalidPageSize = errors.New("page size invalid")
-	ErrInvalidPageID   = errors.New("invalid page id")
-	ErrDoubleFree      = errors.New("freepage on same page called twice")
-)
-
-type PageID uint32
-
-type Page [PageSize]byte
-
-//get and set header fields at fixed offset bytes in a page
-//pagetype 2 , LSN for wal 8, checksum 4 for corruption check
-//basing off of postgres, fix size header to 24 bytes
-
-type pageType uint16
-type checksum uint32
-type lsn uint64
-
-const ( //size ascending
-	offType           = 0
-	offChecksum       = 2
-	offLSN            = 6
-	offReserved       = 14
-	offMagic          = 24
-	offPageSize       = 28
-	offPageCount      = 32
-	offFreeListHead   = 36
-	offNextFreePageID = headerSize
-	headerSize        = 24
-
-	// stuff
-	PageSize      = 4096 //also meta
-	InvalidPageID = 0
-	//meta
-	metaMagic = 0x44424145 //stands for DBAE in ASCII
 )
 
 // convert const no.s into a byte and write them to a slice
@@ -72,9 +32,6 @@ func (p *Page) GetLSN() lsn {
 	return lsn((binary.LittleEndian.Uint64(p[offLSN:])))
 }
 
-type pageCount uint32
-type freeListHead uint32
-
 // store totalpagecount,headof freelist
 func (p *Page) SetPageCount(pc *pageCount) {
 	binary.LittleEndian.PutUint32(p[offPageCount:], uint32(*pc))
@@ -99,12 +56,6 @@ func (p *Page) SetNextFreePageID(id PageID) {
 func (p *Page) GetFreeListHead() PageID { //freelisthead returns pageID
 	return PageID((binary.LittleEndian.Uint32(p[offFreeListHead:])))
 }
-
-const (
-	pageTypeMeta    pageType = 1
-	pageTypeFree    pageType = 2
-	pageTypeUnknown pageType = 0
-)
 
 func (p *Page) initMetaPage() {
 	//set page type to meta
@@ -132,9 +83,6 @@ func (p *Page) Validate() error {
 	return nil
 }
 
-type PageManager struct {
-	file *os.File //curr open file
-}
 //reads , writes require error because they write to disk
 func (pm *PageManager) ReadPage(id PageID, p *Page) error {
 	_, err := pm.file.ReadAt(p[:], int64(id)*PageSize) //skip _ cuz read bytes go into the p slice already
@@ -171,6 +119,10 @@ func (pm *PageManager) Allocate() (PageID, error) {
 		if err := pm.WritePage(0, &meta); err != nil { //gotta write it again
 			return 0, err
 		}
+		var blank Page 
+		if err := pm.WritePage(head, &blank); err != nil { //gotta write it again
+			return 0, err
+		}
 		return head, nil
 	}
 	//Freelist is only bw first page and the last page used,after that its just appending pages
@@ -203,7 +155,9 @@ func (pm *PageManager) FreePage(id PageID) error {
 	if err := pm.ReadPage(0, &meta); err != nil {
 		return err
 	}
-	if id == meta.GetFreeListHead() {
+	var p Page 
+	pm.ReadPage(id,&p)
+	if p.GetPageType() == pageTypeFree{
 		return ErrDoubleFree
 	}
 	var blank Page
