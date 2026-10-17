@@ -2,6 +2,7 @@ package page
 
 import (
 	"encoding/binary"
+	"os"
 )
 
 // convert const no.s into a byte and write them to a slice
@@ -11,9 +12,10 @@ func (p *Page) SetPageType(t *pageType) {
 		binary.LittleEndian.PutUint16(p[offType:], uint16(*t))
 	}
 }
-//reason why some of these i didnt implement error handling is become nothing can fail them basically
-//these are in memory already so writing them cant go wrong
-//disk writes may go bad
+
+// reason why some of these i didnt implement error handling is become nothing can fail them basically
+// these are in memory already so writing them cant go wrong
+// disk writes may go bad
 func (p *Page) SetLSN(l *lsn) {
 	if l != nil {
 		binary.LittleEndian.PutUint64(p[offLSN:], uint64(*l))
@@ -83,7 +85,7 @@ func (p *Page) Validate() error {
 	return nil
 }
 
-//reads , writes require error because they write to disk
+// reads , writes require error because they write to disk
 func (pm *PageManager) ReadPage(id PageID, p *Page) error {
 	_, err := pm.file.ReadAt(p[:], int64(id)*PageSize) //skip _ cuz read bytes go into the p slice already
 	if err != nil {
@@ -103,6 +105,8 @@ func (pm *PageManager) WritePage(id PageID, p *Page) error {
 
 // allocate assumes file is already set up
 func (pm *PageManager) Allocate() (PageID, error) {
+	pm.mutex.Lock()         //go mutex arent reentrant(if readpage/writepage ever locks the same mutex to read the page count(which i ll imeplement later as a range check)) , allocate will freeze forever
+	defer pm.mutex.Unlock() //rn r/w page has no lock implementation, so this is good
 	var meta Page
 	if err := pm.ReadPage(0, &meta); err != nil { //will read the meta page into meta
 		return 0, err
@@ -115,11 +119,11 @@ func (pm *PageManager) Allocate() (PageID, error) {
 		}
 		next := freePage.GetNextFreePageID()
 		x := freeListHead(next)
-		meta.SetFreeListHead(&x) //this sets meta head in mem
+		meta.SetFreeListHead(&x)                       //this sets meta head in mem
 		if err := pm.WritePage(0, &meta); err != nil { //gotta write it again
 			return 0, err
 		}
-		var blank Page 
+		var blank Page
 		if err := pm.WritePage(head, &blank); err != nil { //gotta write it again
 			return 0, err
 		}
@@ -140,6 +144,8 @@ func (pm *PageManager) Allocate() (PageID, error) {
 }
 
 func (pm *PageManager) FreePage(id PageID) error {
+	pm.mutex.Lock()
+	defer pm.mutex.Unlock()
 	if id == InvalidPageID {
 		return ErrInvalidPageID
 	}
@@ -155,9 +161,11 @@ func (pm *PageManager) FreePage(id PageID) error {
 	if err := pm.ReadPage(0, &meta); err != nil {
 		return err
 	}
-	var p Page 
-	pm.ReadPage(id,&p)
-	if p.GetPageType() == pageTypeFree{
+	var p Page
+	if err := pm.ReadPage(id, &p); err != nil {
+		return err
+	}
+	if p.GetPageType() == pageTypeFree {
 		return ErrDoubleFree
 	}
 	var blank Page
@@ -174,4 +182,57 @@ func (pm *PageManager) FreePage(id PageID) error {
 	}
 	return nil
 }
+
+func Open(path string) (*PageManager, error) {
+	//if size is zero of file, means no meta page was set
+	//its a new db
+	//so create meta for it then open
+	//if size not 0 , call validate on meta
+	//return the pm holding file
+
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0644)
+	if err != nil {
+		return nil, err
+	}
+	pm := &PageManager{file: f}
+	data, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	if data.Size() == 0 {
+		//set meta page as its a new file --> aka db
+		var meta Page
+		meta.initMetaPage()
+		if err := pm.WritePage(0, &meta); err != nil {
+			f.Close()
+			return nil, err
+		}
+		if err := f.Sync(); err != nil { //make sure its on disk before u report yes file is open
+			f.Close()
+			return nil, err
+		}
+		return pm, nil
+	}
+	//datasize>0 mean file already setup
+	var meta Page
+	if err := pm.ReadPage(0, &meta); err != nil {
+		f.Close()
+		return nil, err
+	}
+	if err := meta.Validate(); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return pm, nil
+}
+
+func (pm *PageManager) Close() error {
+	if err := pm.file.Sync(); err != nil {
+		pm.file.Close()
+		return err
+	}
+	return pm.file.Close()
+}
+
 

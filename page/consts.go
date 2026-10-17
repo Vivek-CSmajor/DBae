@@ -3,6 +3,7 @@ package page
 import (
 	"errors"
 	"os"
+	"sync"
 )
 
 var (
@@ -47,5 +48,6 @@ const (
 )
 
 type PageManager struct {
-	file *os.File //curr open file
+	file  *os.File //curr open file
+	mutex *sync.Mutex
 }
