@@ -3,6 +3,7 @@ package page
 import (
 	"encoding/binary"
 	"os"
+	"sync"
 )
 
 // convert const no.s into a byte and write them to a slice
@@ -194,7 +195,8 @@ func Open(path string) (*PageManager, error) {
 	if err != nil {
 		return nil, err
 	}
-	pm := &PageManager{file: f}
+
+	pm := &PageManager{file: f,mutex: &sync.Mutex{}}
 	data, err := f.Stat()
 	if err != nil {
 		f.Close()
